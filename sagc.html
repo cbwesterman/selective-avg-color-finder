@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Selective Lasso Average Color with Edge Snap</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; margin: 20px; }
+    #canvas { border: 1px solid #ccc; cursor: crosshair; }
+    #controls { margin-bottom: 10px; }
+    #colorDisplay { margin-top: 10px; width: 50px; height: 50px; display: inline-block; border: 1px solid #000; }
+    #modeSelector { margin: 0 10px; }
+    #clearBtn { margin-left: 10px; }
+  </style>
+  <!-- Include jsfeat for edge detection -->
+  <script src="https://unpkg.com/jsfeat/jsfeat-min.js"></script>
+</head>
+<body>
+  <h1>Selective Lasso Average Color with Edge Snap</h1>
+  <div id="controls">
+    <input type="file" id="imageLoader" accept="image/*">
+    <label id="modeSelector">
+      <input type="radio" name="mode" value="include" checked> Include Selected
+      <input type="radio" name="mode" value="exclude"> Exclude Selected
+    </label>
+    <button id="computeBtn" disabled>Compute Average Color</button>
+    <button id="clearBtn" disabled>Clear Selections</button>
+  </div>
+  <canvas id="canvas"></canvas>
+  <div id="colorInfo">
+    <p>Average Color: <span id="hex">#------</span></p>
+    <div id="colorDisplay"></div>
+  </div>
+  <script>
+    const imageLoader = document.getElementById('imageLoader');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const computeBtn = document.getElementById('computeBtn');
+    const clearBtn = document.getElementById('clearBtn');
+
+    let img = new Image();
+    let width, height;
+    let edgeMap = null; // Uint8Array map of edge pixels
+    let isDrawing = false;
+    let currentPath = null;
+    let currentPoints = [];
+    let lassoPaths = [];
+
+    imageLoader.addEventListener('change', handleImage, false);
+    canvas.addEventListener('mousedown', startLasso);
+    canvas.addEventListener('mousemove', drawLasso);
+    canvas.addEventListener('mouseup', finishLasso);
+    computeBtn.addEventListener('click', computeAverageColor);
+    clearBtn.addEventListener('click', clearSelections);
+
+    function handleImage(e) {
+      const reader = new FileReader();
+      reader.onload = function(event) {
+        img.onload = function() {
+          width = img.width;
+          height = img.height;
+          canvas.width = width;
+          canvas.height = height;
+          redraw();
+          detectEdges();
+          computeBtn.disabled = true;
+          clearBtn.disabled = true;
+          lassoPaths = [];
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(e.target.files[0]);
+    }
+
+    // Run Canny edge detection and store results in edgeMap
+    function detectEdges() {
+      try {
+        const imgData = ctx.getImageData(0, 0, width, height);
+        const gray = new jsfeat.matrix_t(width, height, jsfeat.U8_t | jsfeat.C1_t);
+        jsfeat.imgproc.grayscale(imgData.data, width, height, gray);
+        const edge = new jsfeat.matrix_t(width, height, jsfeat.U8_t | jsfeat.C1_t);
+        jsfeat.imgproc.canny(gray, edge, 20, 50);
+        edgeMap = edge.data;
+      } catch (err) {
+        console.warn('Edge detection failed, disabling snapping:', err);
+        edgeMap = null;
+      }
+    }
+
+    // If near an edge within snapDistance, snap to closest edge pixel
+    function getSnapped(x, y) {
+      if (!edgeMap) return [x, y];
+      const snapDistance = 8;
+      let best = { dist2: snapDistance * snapDistance, pos: [x, y] };
+      const minX = Math.max(0, x - snapDistance);
+      const maxX = Math.min(width - 1, x + snapDistance);
+      const minY = Math.max(0, y - snapDistance);
+      const maxY = Math.min(height - 1, y + snapDistance);
+      for (let yy = minY; yy <= maxY; yy++) {
+        for (let xx = minX; xx <= maxX; xx++) {
+          const idx = yy * width + xx;
+          if (edgeMap[idx]) {
+            const dx = xx - x;
+            const dy = yy - y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < best.dist2) {
+              best.dist2 = d2;
+              best.pos = [xx, yy];
+            }
+          }
+        }
+      }
+      return best.pos;
+    }
+
+    function startLasso(e) {
+      if (!img.src) return;
+      const rect = canvas.getBoundingClientRect();
+      let x = e.clientX - rect.left;
+      let y = e.clientY - rect.top;
+      [x, y] = getSnapped(x, y);
+      currentPath = new Path2D();
+      currentPath.moveTo(x, y);
+      currentPoints = [{ x, y }];
+      isDrawing = true;
+    }
+
+    function drawLasso(e) {
+      if (!isDrawing) return;
+      const rect = canvas.getBoundingClientRect();
+      let x = e.clientX - rect.left;
+      let y = e.clientY - rect.top;
+      [x, y] = getSnapped(x, y);
+      currentPath.lineTo(x, y);
+      currentPoints.push({ x, y });
+      redraw();
+      ctx.strokeStyle = 'red'; ctx.lineWidth = 2;
+      lassoPaths.forEach(obj => ctx.stroke(obj.path));
+      ctx.stroke(currentPath);
+    }
+
+    function finishLasso(e) {
+      if (!isDrawing) return;
+      isDrawing = false;
+      currentPath.closePath();
+      lassoPaths.push({ path: currentPath, points: currentPoints });
+      computeBtn.disabled = false;
+      clearBtn.disabled = false;
+      redraw();
+      ctx.strokeStyle = 'red'; ctx.lineWidth = 2;
+      lassoPaths.forEach(obj => ctx.stroke(obj.path));
+    }
+
+    function redraw() {
+      ctx.clearRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0);
+    }
+
+    function computeAverageColor() {
+      if (lassoPaths.length === 0) {
+        alert('No selections made.'); return;
+      }
+      const mode = document.querySelector('input[name="mode"]:checked').value;
+      const imageData = ctx.getImageData(0, 0, width, height).data;
+      let r = 0, g = 0, b = 0, count = 0;
+      for (let yy = 0; yy < height; yy++) {
+        for (let xx = 0; xx < width; xx++) {
+          let inAny = false;
+          for (const obj of lassoPaths) {
+            if (ctx.isPointInPath(obj.path, xx, yy)) { inAny = true; break; }
+          }
+          if ((mode === 'include' && inAny) || (mode === 'exclude' && !inAny)) {
+            const idx = (yy * width + xx) * 4;
+            r += imageData[idx];
+            g += imageData[idx + 1];
+            b += imageData[idx + 2];
+            count++;
+          }
+        }
+      }
+      if (count === 0) { alert('No pixels match criteria.'); return; }
+      const hex = rgbToHex(
+        Math.round(r/count),
+        Math.round(g/count),
+        Math.round(b/count)
+      );
+      document.getElementById('hex').textContent = hex;
+      document.getElementById('colorDisplay').style.backgroundColor = hex;
+    }
+
+    function clearSelections() {
+      lassoPaths = [];
+      computeBtn.disabled = true;
+      clearBtn.disabled = true;
+      redraw();
+    }
+
+    function rgbToHex(r, g, b) {
+      return '#' + [r, g, b].map(c => c.toString(16).padStart(2, '0')).join('');
+    }
+  </script>
+</body>
+</html>
